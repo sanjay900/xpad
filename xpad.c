@@ -150,6 +150,20 @@ static bool auto_poweroff = true;
 module_param(auto_poweroff, bool, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(auto_poweroff, "Power off wireless controllers on suspend");
 
+struct xpad_x360_gamepad_descriptor {
+    u8 bLength;
+    u8 bDescriptorType;
+    u8 reserved[2];
+    u8 subtype;
+    u8 reserved2;
+    u8 bEndpointAddressIn;
+    u8 bMaxDataSizeIn;
+    u8 reserved3[5];
+    u8 bEndpointAddressOut;
+    u8 bMaxDataSizeOut;
+    u8 reserved4[2];
+} __attribute__((packed));
+
 static const struct xpad_device {
 	u16 idVendor;
 	u16 idProduct;
@@ -820,6 +834,7 @@ struct usb_xpad {
 	int packet_type;		/* type of the extended packet */
 	int pad_nr;			/* the order x360 pads were attached */
 	int quirks;
+	int subtype;
 	const char *name;		/* name of the device */
 	struct work_struct work;	/* init/remove device from callback */
 	struct delayed_work poweroff_work; /* work struct for poweroff on mode long press */
@@ -828,6 +843,28 @@ struct usb_xpad {
 	struct timer_list ghl_poke_timer;	/* Timer for periodic poke of GHL magic data */
 };
 
+
+static ssize_t
+subtype_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct usb_xpad *xpad = input_get_drvdata(to_input_dev(dev));
+	return sysfs_emit(buf, "%d\n", xpad->subtype);
+}
+static DEVICE_ATTR_RO(subtype);
+
+static struct attribute *xpad_attrs[] = {
+	&dev_attr_subtype.attr,
+	NULL
+};
+static struct attribute_group xpad_group = {
+      .attrs = xpad_attrs,
+	  .name = "xpad"
+};
+
+static const struct attribute_group *xpad_groups[] = {
+      &xpad_group,
+      NULL,
+};
 static int xpad_init_input(struct usb_xpad *xpad);
 static void xpad_deinit_input(struct usb_xpad *xpad);
 static void xpadone_ack_mode_report(struct usb_xpad *xpad, u8 seq_num);
@@ -1116,11 +1153,15 @@ static void xpad360w_process_packet(struct usb_xpad *xpad, u16 cmd, unsigned cha
 	/* Presence change */
 	if (data[0] & 0x08) {
 		present = (data[1] & 0x80) != 0;
-
 		if (xpad->pad_present != present) {
 			xpad->pad_present = present;
 			schedule_work(&xpad->work);
 		}
+	}
+
+	/* Link report */
+	if (data[0] == 0x00 && data[1] == 0x0F) {
+		xpad->subtype = data[25] & 0x7f;
 	}
 
 	/* Valid pad data */
@@ -2215,6 +2256,7 @@ static void xpad_deinit_input(struct usb_xpad *xpad)
 static int xpad_init_input(struct usb_xpad *xpad)
 {
 	struct input_dev *input_dev;
+	struct xpad_x360_gamepad_descriptor *input_desc;
 	int i, error;
 
 	input_dev = input_allocate_device();
@@ -2224,11 +2266,20 @@ static int xpad_init_input(struct usb_xpad *xpad)
 	xpad->dev = input_dev;
 	input_dev->name = xpad->name;
 	input_dev->phys = xpad->phys;
+	xpad->subtype = 1;
+	xpad->dev->dev.groups = xpad_groups;
+
 	usb_to_input_id(xpad->udev, &input_dev->id);
 
 	if (xpad->xtype == XTYPE_XBOX360W) {
 		/* x360w controllers and the receiver have different ids */
 		input_dev->id.product = 0x02a1;
+	}
+
+	if (xpad->xtype == XTYPE_XBOX360) {
+		if (usb_get_extra_descriptor(xpad->intf->cur_altsetting, 0x21, &input_desc) != -1) {
+			xpad->subtype = input_desc->subtype;
+		}
 	}
 
 	input_dev->dev.parent = &xpad->intf->dev;
